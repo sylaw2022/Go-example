@@ -1,0 +1,23 @@
+# Go backend binaries
+backend/server
+
+# Frontend build output
+frontend/dist
+frontend/node_modules
+
+# Go module cache
+go.sum
+
+# Environment files
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

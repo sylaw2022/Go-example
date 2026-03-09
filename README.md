@@ -44,7 +44,68 @@ cd frontend && npm run dev
 
 ---
 
+## Building the Backend
+
+### Development (run without compiling)
+```bash
+cd backend
+PORT=9090 go run ./cmd/server
+```
+
+### Compile to a Binary
+```bash
+cd backend
+go build -o ./bin/server ./cmd/server
+PORT=9090 ./bin/server
+```
+
+### Production Build (smaller binary, no debug symbols)
+```bash
+go build -ldflags="-s -w" -o ./bin/server ./cmd/server
+```
+
+| Flag | Effect |
+|---|---|
+| `-s` | Strips symbol table |
+| `-w` | Strips DWARF debug info |
+| Result | ~30-40% smaller binary |
+
+### Cross-Compile for Other Platforms
+```bash
+# Windows
+GOOS=windows GOARCH=amd64 go build -o ./bin/server.exe ./cmd/server
+
+# macOS (Apple Silicon)
+GOOS=darwin GOARCH=arm64 go build -o ./bin/server-mac ./cmd/server
+```
+
+Go compiles to a **self-contained native binary** with zero external dependencies — no runtime, no `libc`, no Docker required to run it.
+
+### Makefile
+Add a `Makefile` to `backend/` for convenience:
+
+```makefile
+.PHONY: build run dev clean
+
+build:
+	go build -ldflags="-s -w" -o ./bin/server ./cmd/server
+
+run: build
+	PORT=9090 ./bin/server
+
+dev:
+	PORT=9090 go run ./cmd/server
+
+clean:
+	rm -rf ./bin/
+```
+
+Then use `make dev`, `make build`, or `make run`.
+
+---
+
 ## Q&A: Concepts Covered in This Session
+
 
 ### 1. What is `github.com/sylaw/fullstack-app/internal/api` in the import?
 

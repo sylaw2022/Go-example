@@ -1,12 +1,12 @@
-# Go + React Fullstack Application
+# Go + Next.js Fullstack Application
 
-A fullstack application demonstrating industrial-standard Go backend architecture paired with a modern React frontend.
+A fullstack application demonstrating industrial-standard Go backend architecture paired with a modern Next.js frontend.
 
 ## Project Structure
 
 ```
 Go-language/
-├── backend/                    # Go backend (Clean Architecture)
+├── backend/                    # Go backend (Clean Architecture / DDD)
 │   ├── cmd/
 │   │   └── server/
 │   │       └── main.go         # Entry point, graceful shutdown
@@ -15,16 +15,31 @@ Go-language/
 │   │   │   ├── router.go       # Chi router + middleware
 │   │   │   └── handlers/       # HTTP handlers
 │   │   ├── config/             # Environment config
-│   │   ├── domain/             # Core domain types
-│   │   ├── repository/         # Data access layer
+│   │   ├── domain/             # Core domain types & errors
+│   │   ├── repository/         # Data access layer (Repository pattern)
 │   │   └── service/            # Business logic layer
 │   └── go.mod
-└── frontend/                   # React + Vite frontend
-    ├── src/
-    │   ├── App.jsx             # Main component
-    │   ├── index.css           # Global styles (glassmorphism)
-    │   └── lib/api.js          # Axios API client
-    └── package.json
+├── frontend/                   # Next.js 14 App Router frontend
+│   ├── app/
+│   │   ├── globals.css         # Global styles (glassmorphism)
+│   │   ├── layout.tsx          # Root layout
+│   │   └── page.tsx            # Main page (Server Component)
+│   ├── lib/
+│   │   └── api.ts              # Typed fetch helper (server-side)
+│   ├── types/
+│   │   └── user.ts             # TypeScript User interface
+│   └── next.config.ts          # API proxy config
+└── frontend-old/               # Preserved original Vite + React frontend
+```
+
+## Running the App
+
+```bash
+# Terminal 1 — Go backend
+cd backend && PORT=9090 go run ./cmd/server/main.go
+
+# Terminal 2 — Next.js frontend (http://localhost:3000)
+cd frontend && npm run dev
 ```
 
 ---
@@ -295,3 +310,356 @@ Your App Process → Binder IPC → system_server (CameraService) → /dev/video
 | **Security** | File system permissions | Fine-grained Android permission system |
 
 Binder was created because Message Queues are too slow and complex for the hundreds of cross-process calls Android makes per second. Binder makes a cross-process call feel like a normal local method call using **AIDL (Android Interface Definition Language)**, which auto-generates all serialization code.
+
+---
+
+### 25. What does the graceful shutdown goroutine do in `main.go`?
+
+The graceful shutdown goroutine ensures that when the server receives a stop signal (e.g., `Ctrl+C` or `SIGTERM`), it finishes processing active requests before exiting rather than rudely cutting off users mid-request.
+
+```go
+go func() {
+    <-sig                  // blocks until OS signal arrives
+    server.Shutdown(ctx)   // stops new connections, lets current ones finish
+    serverStopCtx()        // signals main() it's safe to exit
+}()
+```
+
+1. **`<-sig`** blocks the goroutine until an OS interrupt signal arrives.
+2. A 30-second context (`context.WithTimeout`) is created — the server must finish all active requests within this window.
+3. A watchdog goroutine monitors the deadline. If 30 seconds elapse before completion, `log.Fatal` forces the process to exit.
+4. `server.Shutdown(ctx)` stops accepting new connections but lets in-progress requests complete.
+5. `serverStopCtx()` notifies `main()` that cleanup is done and the process may exit cleanly.
+
+---
+
+### 26. What is `NewInMemoryUserRepository()`?
+
+It is a **constructor function** that creates a fake, in-memory database pre-populated with test data. Instead of connecting to PostgreSQL, it stores users in a Go `map` in RAM.
+
+```go
+func NewInMemoryUserRepository() *InMemoryUserRepository {
+    return &InMemoryUserRepository{
+        users: map[int]domain.User{
+            1: {ID: 1, Name: "Alice Smith",   Email: "alice@example.com"},
+            2: {ID: 2, Name: "Bob Jones",     Email: "bob@example.com"},
+            3: {ID: 3, Name: "Charlie Brown", Email: "charlie@example.com"},
+        },
+    }
+}
+```
+
+- **Fast prototyping:** No database setup required.
+- **Unit testing:** Tests run instantly with no external dependencies.
+- **Easy swap:** Replace with `NewPostgresUserRepository()` in `main.go` and the rest of the app is unchanged.
+
+The struct also embeds a `sync.RWMutex` to safely handle concurrent HTTP requests reading/writing the map simultaneously.
+
+---
+
+### 27. What is `users map[int]domain.User`?
+
+This is a struct field declaration defining a **hashmap (dictionary)** where:
+- **Key:** `int` — the user's ID
+- **Value:** `domain.User` — the full user struct
+
+It enables O(1) lookup by ID (`r.users[42]`) rather than scanning a slice sequentially. When `GetAll()` is called, the map is converted to a `[]domain.User` slice for the HTTP response, because JSON APIs return ordered arrays.
+
+---
+
+### 28. What is the `UserRepository` interface?
+
+```go
+type UserRepository interface {
+    GetAll() ([]domain.User, error)
+    GetByID(id int) (domain.User, error)
+}
+```
+
+An interface is a **contract**. Any Go type that implements these two methods automatically satisfies `UserRepository` — no `implements` keyword needed.
+
+This enables the **Repository Pattern**: the service layer depends only on the interface, not on any specific database implementation. Swapping `InMemoryUserRepository` for `PostgresUserRepository` requires changing only one line in `main.go`.
+
+---
+
+### 29. What is a Go method receiver like `func (r *InMemoryUserRepository) GetAll()`?
+
+In Go, there are no classes. Instead, you attach methods to types using a **receiver** — Go's explicit equivalent of `this`/`self`:
+
+```go
+func (r *InMemoryUserRepository) GetAll() ([]domain.User, error) {
+    // r is the struct instance
+}
+```
+
+- `r` is a pointer receiver (`*`) — it accesses the real struct in memory, not a copy.
+- This is what satisfies the `UserRepository` interface. Standalone functions cannot satisfy interfaces; only methods attached via receivers can.
+
+---
+
+### 30. What is the difference between `[]domain.User` and `map[int]domain.User`?
+
+| | `[]domain.User` (Slice) | `map[int]domain.User` (Map) |
+|---|---|---|
+| **Access** | By position: `users[0]` | By key: `users[42]` |
+| **Order** | Always preserved | Not guaranteed |
+| **Lookup by ID** | O(n) — must scan all | O(1) — direct jump |
+| **Use when** | Returning a list to a client | Storing data for fast ID lookup |
+
+The repository stores data as a **map** for fast lookups but returns a **slice** for the HTTP response because JSON clients expect an ordered array.
+
+---
+
+### 31. What is `var ErrUserNotFound = errors.New("user not found")`?
+
+This is a **sentinel error** — a named, package-level error value that callers can precisely identify using `errors.Is()`.
+
+```go
+// In the repository
+return domain.User{}, domain.ErrUserNotFound
+
+// In the handler — identify the specific error
+if errors.Is(err, domain.ErrUserNotFound) {
+    http.Error(w, "not found", http.StatusNotFound) // 404
+    return
+}
+```
+
+Sentinel errors are declared in the `domain` package because they belong to the business domain (not to the HTTP or database layers), preventing circular imports.
+
+---
+
+### 32. How does Go know when `exists` is `false` in `user, exists := r.users[id]`?
+
+This is Go's built-in **"comma ok" idiom** for map lookups. When you access a map with two variables, the second bool is automatically set by the runtime:
+
+- `true`: the key was found, `user` holds the value.
+- `false`: the key does not exist, `user` is the zero value (`domain.User{}`).
+
+You cannot rely on checking if the value is empty because zero-value structs are valid data (a user with ID 0 and empty name is possible). The `exists` bool is the only reliable indicator.
+
+---
+
+### 33. What do `r.mu.RLock()` and `defer r.mu.RUnlock()` do?
+
+A `sync.RWMutex` protects the map from concurrent read/write corruption. Go maps are not thread-safe — two simultaneous goroutines accessing the same map can crash the program with `fatal error: concurrent map read and map write`.
+
+- **`RLock()`:** Acquires a read lock. Multiple goroutines can hold a read lock simultaneously, but it blocks any writer.
+- **`defer RUnlock()`:** Releases the lock when the function returns, no matter what — including on error return paths.
+
+For write operations (`Lock()`/`Unlock()`), all concurrent readers and writers are blocked.
+
+---
+
+### 34. What does `NewUserService(repo repository.UserRepository)` demonstrate?
+
+This constructor demonstrates **Dependency Injection** — the repository is passed in from the outside rather than created inside the service:
+
+```go
+func NewUserService(repo repository.UserRepository) UserService {
+    return &userServiceImpl{ repo: repo }
+}
+```
+
+Key design points:
+1. **Accepts an interface**, not a concrete type — any `UserRepository` implementation works.
+2. **Returns an interface** (`UserService`) — callers cannot access the concrete `userServiceImpl` struct.
+3. **`userServiceImpl` is lowercase (unexported)** — only accessible through the interface.
+
+This is wired in `main.go`:
+```go
+repo    := repository.NewInMemoryUserRepository()
+service := service.NewUserService(repo)
+handler := handler.NewUserHandler(service)
+```
+
+---
+
+### 35. What does `SetupRouter` do?
+
+`SetupRouter` creates and configures the `chi` HTTP router — the traffic controller for all incoming web requests.
+
+**Middleware chain (runs on every request):**
+1. `RequestID` — stamps each request with a unique UUID for distributed tracing.
+2. `RealIP` — extracts the real client IP from `X-Forwarded-For` headers (behind load balancers).
+3. `Logger` — logs method, URL, response status, and duration automatically.
+4. `Recoverer` — catches Go panics and returns HTTP 500 instead of crashing the server.
+5. **CORS middleware** — sets `Access-Control-Allow-Origin` headers and handles preflight `OPTIONS` requests.
+
+**Routes registered:**
+| Method | Path | Handler |
+|---|---|---|
+| GET | `/health` | `HealthCheck` |
+| GET | `/api/v1/users` | `GetAll` |
+| GET | `/api/v1/users/{id}` | `GetByID` |
+
+---
+
+### 36. How does `RequestID` middleware help debug production issues?
+
+Every request is stamped with a UUID. The `Logger` records it alongside the timestamp, URL, and status code:
+
+```
+2026-03-09 15:00:04  GET  /api/v1/users/99  404  reqID=a3f9c1b2
+```
+
+When a user reports "my request failed at 3pm," they provide their reference ID (shown in the error dialog). You search logs for `a3f9c1b2` and instantly see the full request lifecycle — every log line your handlers emitted is tagged with the same ID.
+
+---
+
+### 37. How does `RealIP` middleware work?
+
+Production servers sit behind load balancers/proxies (Nginx, Cloudflare). Without `RealIP`, every request appears to originate from the proxy's internal IP (`127.0.0.1`).
+
+`RealIP` reads the `X-Real-IP` or `X-Forwarded-For` header set by the proxy and overwrites `r.RemoteAddr` with the actual client IP. This is required for rate limiting, geo-blocking, audit logs, and fraud detection to work correctly.
+
+---
+
+### 38. How does the CORS middleware work?
+
+Browsers enforce the **Same-Origin Policy**: JavaScript on `http://localhost:5173` is blocked from reading responses from `http://localhost:8080` unless the backend explicitly allows it. Origin = protocol + domain + port; different port = different origin.
+
+The CORS middleware adds three headers to every response:
+- `Access-Control-Allow-Origin: *` — which frontend domains are trusted.
+- `Access-Control-Allow-Methods` — which HTTP verbs are permitted.
+- `Access-Control-Allow-Headers` — which request headers (e.g., `Authorization`) are permitted.
+
+Browsers send a **preflight `OPTIONS` request** before any cross-origin POST/PUT with custom headers. The middleware responds `200 OK` immediately without invoking business logic, then the browser sends the real request.
+
+> In production, replace `"*"` with your exact front-end URL (e.g., `"https://yourapp.com"`) to prevent other websites from exploiting your users' authenticated sessions (CSRF).
+
+---
+
+### 39. Why doesn't `HealthCheck` return the HTTP response?
+
+In Go's `net/http`, `w http.ResponseWriter` is not a value you return — it is a **live pipe directly connected to the client's TCP socket**. Writing to `w` sends data to the browser in real time:
+
+```go
+w.Header().Set("Content-Type", "application/json")  // writes headers to buffer
+w.WriteHeader(http.StatusOK)                         // sends "HTTP/1.1 200 OK"
+json.NewEncoder(w).Encode(...)                       // streams JSON body
+```
+
+When the handler function returns, the Go HTTP server flushes any remaining data and closes the response. This design enables streaming large responses chunk-by-chunk without buffering the entire payload in memory.
+
+---
+
+### 40. What is `chi`?
+
+`chi` is a lightweight, idiomatic Go HTTP router. Go's built-in `net/http` has no URL parameter extraction or route grouping. `chi` adds:
+- **URL parameters:** `r.Get("/users/{id}", handler)` and `chi.URLParam(r, "id")`.
+- **Route groups:** `r.Route("/api/v1", func(r chi.Router) { ... })`.
+- **Method-specific routing:** `r.Get(...)`, `r.Post(...)`, `r.Delete(...)`.
+- **Composable middleware:** `r.Use(...)`.
+
+Unlike full frameworks (Gin, Echo), `chi` uses standard `http.HandlerFunc` throughout — your code stays idiomatic Go and your handlers are 100% compatible with the standard library.
+
+---
+
+### 41. What is `context.WithCancel(context.Background())`?
+
+```go
+serverCtx, serverStopCtx := context.WithCancel(context.Background())
+```
+
+- `context.Background()` is the root context — it never expires and never cancels.
+- `context.WithCancel(...)` wraps it and returns: a child **context** (`serverCtx`) and a **cancel function** (`serverStopCtx`).
+- Calling `serverStopCtx()` closes `serverCtx.Done()`, signalling all code watching this context to stop.
+- Contexts form a tree: cancelling a parent automatically cancels all children (including the 30-second shutdown timeout context derived from `serverCtx`).
+
+---
+
+### 42. What is `ctx.Done()` and how does `<-ctx.Done()` work?
+
+`ctx.Done()` returns a **read-only channel** (`<-chan struct{}`) that is **closed** when the context is cancelled or its deadline expires. Receiving from a closed channel in Go unblocks immediately and returns the zero value — this is used as a broadcast signal to all goroutines waiting on `<-ctx.Done()`.
+
+```go
+<-serverCtx.Done()   // main() sleeps here until serverStopCtx() is called
+```
+
+Two cancellation reasons are distinguishable via `ctx.Err()`:
+- `context.Canceled` — manually cancelled (clean shutdown).
+- `context.DeadlineExceeded` — timeout elapsed (force-kill path).
+
+---
+
+### 43. How do Go's Native Syscalls work, bypassing `libc`?
+
+Most languages (C, Python, Node.js) talk to the OS through `libc` (e.g., `glibc` on Linux). Go **bypasses `libc` entirely** on Linux by writing raw Assembly instructions that trap directly into the Linux Kernel.
+
+**How a syscall works:**
+1. Go loads the syscall ID and arguments into CPU registers:
+   - `RAX` = syscall number (e.g., `1` = `sys_write`)
+   - `RDI/RSI/RDX` = arguments
+2. Executes the single `SYSCALL` assembly instruction.
+3. The CPU switches from **Ring 3 (User Mode)** to **Ring 0 (Kernel Mode)**.
+4. The kernel executes the request and returns control via `SYSRET`.
+
+**Why this matters:**
+- Go binaries have **zero dynamic library dependencies** on Linux.
+- They run inside a completely empty Docker container (`FROM scratch`).
+- Cross-compilation works without any toolchain: `GOOS=linux GOARCH=amd64 go build` on a Mac produces a perfect Linux binary.
+
+> On macOS and Windows, Go routes through the OS's standard library because Apple and Microsoft change their internal syscall IDs without compatibility guarantees.
+
+---
+
+### 44. What is Domain-Driven Design (DDD)?
+
+DDD is a software architecture philosophy where your **code structure mirrors the real-world business problem** (the "domain") rather than technical concerns.
+
+| DDD Concept | Your Code |
+|---|---|
+| **Entity** | `domain.User` — has a unique identity (`ID`) that persists over time |
+| **Value Object** | `Money{Amount, Currency}` — defined by its value, immutable |
+| **Repository Interface** | `UserRepository` in `repository/` — domain defines the contract |
+| **Repository Implementation** | `InMemoryUserRepository` / `PostgresUserRepository` — infrastructure detail |
+| **Sentinel Error** | `domain.ErrUserNotFound` — domain-owned error |
+| **Service** | `UserService` — business logic coordination |
+| **Delivery Mechanism** | HTTP handlers — replaceable transport layer |
+
+The folder structure already enforces DDD: the `domain` package has no external imports, and all other layers import from it — never the reverse.
+
+---
+
+### 45. Do you need to understand Go syntax to be an expert?
+
+Knowing syntax is necessary but is only the **floor**, not the ceiling. Go's syntax is deliberately minimal (the full spec can be read in a few hours). What separates experts is depth in four areas:
+
+1. **Goroutines & Channels** — when NOT to use them; designing channel communication to avoid deadlocks.
+2. **Error handling** — wrapping errors with `fmt.Errorf("...: %w", err)`, `errors.Is()`, `errors.As()`, sentinel errors.
+3. **Interfaces** — small, focused interfaces (`io.Reader`) vs bloated ones; the zero-value rule.
+4. **`context.Context`** — propagating deadlines and cancellation through all layers correctly.
+
+---
+
+### 46. Do Go design principles apply to other languages?
+
+Almost entirely. The best design principles are **language-agnostic**:
+
+| Go Concept | Universal Principle | Other Languages |
+|---|---|---|
+| Small interfaces | Program to abstractions | Java `Interface`, TypeScript `interface`, Python `Protocol` |
+| Repository pattern | Separate data access from logic | Every language |
+| Layered architecture | Dependency flows inward | Clean Architecture, Hexagonal Architecture |
+| Explicit errors | Always handle failure paths | Rust `Result<T,E>`, Swift `throws` |
+| Composition over inheritance | Has-a over is-a | Go uses struct embedding; applies everywhere |
+
+Go is one of the best languages to learn design principles because it **enforces** good habits by refusing to compile unused imports, having no inheritance, and returning errors explicitly.
+
+---
+
+### 47. Why does the Next.js migration eliminate CORS?
+
+In the Vite+React app, the **browser** called the Go backend directly:
+```
+Browser (localhost:5173) → Go API (localhost:8080)  → CORS required
+```
+
+In Next.js with **React Server Components**, the HTTP request is made by the Next.js **server process**, not the browser:
+```
+Browser → Next.js server (localhost:3000) → Go API (localhost:9090)  → No CORS
+```
+
+CORS is a browser security check. Server-to-server communication has no browser involved and never triggers a CORS check. The browser only ever talks to the Next.js server — one origin, zero CORS issues.
+

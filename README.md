@@ -724,3 +724,106 @@ Browser → Next.js server (localhost:3000) → Go API (localhost:9090)  → No 
 
 CORS is a browser security check. Server-to-server communication has no browser involved and never triggers a CORS check. The browser only ever talks to the Next.js server — one origin, zero CORS issues.
 
+
+### 48. Does Go provide all necessary libraries for backend services?
+
+Yes, Go is famous for its **"batteries-included" standard library**, heavily optimized for scalable backends. 
+
+**Standard Library capabilities (No frameworks needed):**
+- **Routing:** `net/http` provides a production-grade HTTP server and router (with path variables and method routing in Go 1.22+).
+- **JSON:** `encoding/json` natively parses and formats JSON.
+- **Database:** `database/sql` provides concurrent, connection-pooled interfaces to relational databases.
+- **Crypto:** `crypto/tls` handles HTTPS encryption.
+
+**Where you still need 3rd-party libraries:**
+- **Database Drivers:** You must import drivers like `pgx` (Postgres) or `go-redis` so `database/sql` knows how to talk to specific databases.
+- **Environment config:** `godotenv` to load `.env` files locally.
+- **Convenience tools:** (Optional) Lightweight routers like `chi`, query builders like `sqlc`, or validation libraries.
+
+A major benefit of Go is avoiding the "framework rot" common in Node/Python.
+
+---
+
+### 49. How does the `pgx` PostgreSQL driver work technically?
+
+`pgx` is a high-performance, concurrent TCP-level implementation of the **PostgreSQL wire protocol**, customized for Go's memory model.
+
+- **Connection Pooler (`pgxpool`):** Uses Go's concurrency (goroutines, mutexes, channels) to maintain a pool of actively open database TCP connections, multiplexing thousands of incoming requests over a small number of physical connections.
+- **Binary Encoding:** Unlike older drivers that cast data to strings, `pgx` aggressively uses PostgreSQL's binary format to map wire data directly to Go structs, saving massive amounts of RAM allocation and GC pauses.
+- **Advanced Postgres Features:** Unlike standard SQL adapters, it has native support for Postgres's `COPY` protocol (bulk inserts) and asynchronous `LISTEN/NOTIFY` pub-sub channels.
+
+---
+
+### 50. What is a Connection Pooler (like PgBouncer/Supavisor)?
+
+In PostgreSQL, every new connection forces the database to fork a heavy, 10MB+ Operating System process. Without a pooler, 5,000 incoming requests would instantly crash the database server.
+
+A connection pooler is proxy middleware that multiplexes tens of thousands of lightweight incoming connections onto a tiny pool of ~50 heavy, real Postgres connections. 
+
+**Transaction Pooling:** 
+The standard mode for modern backends. The pooler loans a real database connection to your backend *only for the exact milliseconds* a SQL transaction (BEGIN to COMMIT) runs. This is practically identical to how Go's M:N scheduler multiplexes thousands of lightweight goroutines onto a few heavy OS threads.
+
+---
+
+### 51. How does `epoll` support multiple requests with one event loop?
+
+`epoll` is the Linux kernel system call that makes high-concurrency (Node.js, Nginx, PgBouncer) possible. Pre-`epoll` systems (`select()`) forced the software to constantly pass the OS an array of thousands of sockets and ask it to scan them linearly (O(N) CPU waste).
+
+**How `epoll` (O(1)) works:**
+1. The server registers a network socket in the kernel's internal Red-Black tree once.
+2. The server thread calls `epoll_wait()` and goes to sleep (0% CPU).
+3. The network card receives data and triggers a **hardware interrupt**.
+4. The kernel looks up the socket, adds it to a "Ready List", and wakes the sleeping thread.
+5. The thread uses `copy_to_user` to instantly fetch the handful of active events without scanning empty sockets.
+
+*(Myth debunk: It is widely claimed `epoll` uses `mmap` for zero-copy memory between kernel and user-space. This is false. `io_uring` uses `mmap`, while `epoll` uses `copy_to_user`.)*
+
+---
+
+### 52. Why must `signal.Notify(make(chan os.Signal, 1))` have a buffer size of 1?
+
+```go
+sig := make(chan os.Signal, 1) // Buffer of 1 is CRITICAL
+signal.Notify(sig, os.Interrupt)
+```
+
+The Go runtime delivers OS signals (like `SIGTERM`) using a **non-blocking send**. 
+When the OS sends a kill signal, if your application is busy and not actively paused on `<-sig` at that exact microsecond, the Go runtime will *drop the signal entirely* rather than blocking itself. 
+
+By adding a buffer of `1`, the Go runtime can instantly drop the kill signal into the channel's "mailbox" without blocking. Seconds later, when your code finally calls `<-sig`, it retrieves the signal perfectly.
+
+---
+
+### 53. How does Go use `make` for Slices, Maps, and Channels?
+
+`make(T, args...)` is a built-in function that allocates memory and initializes the internal data structures for slices, maps, and channels (returning an initialized value, not a pointer like `new()`).
+
+- **Slices:** `make([]int, 0, 100)` pre-allocates an underlying array of capacity 100 to prevent expensive reallocation during an `append` loop.
+- **Maps:** `make(map[string]int, 1000)` pre-allocates hash table buckets, preventing the map from having to constantly rehash and rebuild as it grows.
+- **Channels:** `make(chan int, 1)` allocates the internal synchronization queue, mutex lock, and optionally a buffer queue. (An uninitialized channel is `nil` and blocks forever).
+
+---
+
+### 54. Why does every Go App use `context.Context`?
+
+Contex is the backbone of Go concurrency. Because goroutines do not have parent-child hierarchies, `context` allows you to link thousands of independent tasks together. 
+
+It provides 3 superpowers:
+1. **Cancellation:** A parent can call `cancel()`, instantly aborting all database queries and child functions down the tree. 
+2. **Timeouts:** `context.WithTimeout(ctx, 2*time.Second)` automatically cancels the operation if it exceeds the SLA.
+3. **Request Data:** Pass Auth Tokens or Request IDs silently through layers of code.
+
+**Under the hood:** `ctx.Done()` returns a read-only channel `<-chan struct{}`. When a context is cancelled, Go **closes this channel**. Any goroutine blocked on a `select { case <-ctx.Done(): }` instantly wakes up, allowing it to gracefully exit.
+
+---
+
+### 55. How does Graceful HTTP Shutdown work?
+
+You execute `server.Shutdown(ctx)` when a termination signal is received.
+
+1. **Stop Listening:** Internally, `Shutdown()` instantly closes the underlying TCP listeners, refusing new connections.
+2. **Start Waiting:** It waits patiently for in-progress HTTP handlers to finish serving their users before disconnecting them.
+3. **The Race:** The function blocks until either (A) the active users finish, or (B) the `shutdownCtx` deadline expires.
+
+If the deadline expires first, `Shutdown()` returns `context.DeadlineExceeded` and the server developer typically calls `log.Fatalf` to instantly force-kill the process (`os.Exit(1)`), violently destroying any hung database connections to prevent the server from hanging forever.
+

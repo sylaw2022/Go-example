@@ -827,3 +827,51 @@ You execute `server.Shutdown(ctx)` when a termination signal is received.
 
 If the deadline expires first, `Shutdown()` returns `context.DeadlineExceeded` and the server developer typically calls `log.Fatalf` to instantly force-kill the process (`os.Exit(1)`), violently destroying any hung database connections to prevent the server from hanging forever.
 
+---
+
+### 56. Can Go call C libraries directly?
+
+Yes, Go can call C libraries directly using a built-in feature called **cgo**. `cgo` enables Go packages to seamlessly call C code and link against C libraries. You can write C code directly in your Go files using special comments (the preamble) immediately above `import "C"`. 
+
+**Important Considerations for cgo:**
+- **Performance Overhead:** The context switch between Go's runtime and C's runtime adds noticeable overhead for fast, frequently called functions.
+- **Memory Management:** Go manages its own memory (GC), but C does not. Data passed to C often must be manually freed (`C.free()`) to prevent leaks.
+- **Portability:** Pure Go easily cross-compiles (e.g., `GOOS=linux`). Using `cgo` requires a C cross-compiler toolchain, making builds much more complex.
+
+---
+
+### 57. Is the Go standard library enough for various backend applications?
+
+**Yes, absolutely.** Go was designed specifically for large-scale backend engineering (networking, concurrency). 
+
+Its "Batteries Included" standard library covers almost everything needed for production backends:
+- **`net/http`:** A robust HTTP client and server (often used without frameworks).
+- **`database/sql`:** A unified interface for SQL databases.
+- **`encoding/json`:** Fast, built-in JSON serialization.
+- **`crypto/*`:** State-of-the-art cryptography.
+
+For the few things it doesn't cover (like specific database drivers or advanced routing), the third-party ecosystem is massive and battle-tested (e.g., `pgx`, `chi`, `sqlc`, `gorm`).
+
+---
+
+### 58. Since Node.js uses `epoll`, why does Go consume less RAM than Node.js?
+
+While both use asynchronous I/O (`epoll`/`kqueue`) to handle massive concurrency without blocking the CPU, their memory models are fundamentally different:
+
+1. **AOT Binary vs. V8 Engine:** Go compiles Ahead-Of-Time to an optimized native binary (~2-5 MB idle RAM). Node.js runs the V8 JavaScript VM, which requires a heavy baseline (~30-50 MB) just for its JIT compiler and GC structures.
+2. **Raw Memory vs. JS Objects:** Go is statically typed and packs data tightly. A struct with two 32-bit integers takes exactly 8 bytes. JavaScript dynamically wraps every object and property with hidden classes and metadata padding, bloating memory massively when dealing with arrays of 10,000+ items.
+3. **Goroutines vs. Closures:** Go handles 10,000 concurrent network connections by parking 10,000 lightweight goroutines (2 KB stack each). Node.js handles them by nesting massive Promise chains and closure contexts on the V8 Heap.
+4. **Escape Analysis:** Go allocates short-lived variables on the localized Stack (instantly freed). Node.js allocates almost everything on the Heap, requiring heavy GC sweeps.
+
+---
+
+### 59. If Go is so fast and light, why still use Next.js?
+
+**They solve completely different problems.**
+
+- **Next.js (React)** is purely for the **Presentation Layer**. It executes highly interactive UI components, handles browser routing, image optimization, and Server-Side Rendering (SSR) for SEO. 
+- **Go** is for the **API / Business Layer**. Go queries the database, processes intense business logic, and formats JSON.
+
+Building an entire interactive UI in pure Go creates a slow "full-page refresh" experience because it lacks React's DOM-diffing logic. 
+
+**The BFF Pattern (Backend for Frontend):** Next.js focuses strictly on rendering the perfect user interface. It makes HTTP calls to the hyper-fast Go API to fetch real-time data. This perfect separation of concerns allows both teams (frontend and backend) to scale independently, offering the best of both worlds.
